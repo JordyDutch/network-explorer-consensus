@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,9 @@ import (
 	"github.com/prysmaticlabs/go-bitfield"
 	"github.com/sirupsen/logrus"
 )
+
+// LighthouseLatestHeadEpoch is used to cache the latest head epoch for participation requests
+var LighthouseLatestHeadEpoch uint64 = 0
 
 // LighthouseClient holds the Lighthouse client info
 type LighthouseClient struct {
@@ -271,7 +275,7 @@ func (lc *LighthouseClient) GetEpochAssignments(epoch uint64) (*types.EpochAssig
 }
 
 // GetEpochData will get the epoch data from Lighthouse RPC api
-func (lc *LighthouseClient) GetEpochData(epoch uint64) (*types.EpochData, error) {
+func (lc *LighthouseClient) GetEpochData(epoch uint64, skipHistoricBalances bool) (*types.EpochData, error) {
 	wg := &sync.WaitGroup{}
 	mux := &sync.Mutex{}
 	var err error
@@ -299,44 +303,45 @@ func (lc *LighthouseClient) GetEpochData(epoch uint64) (*types.EpochData, error)
 	var validatorBalances7d map[uint64]uint64
 	var validatorBalances31d map[uint64]uint64
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		start := time.Now()
-		var err error
-		validatorBalances1d, err = lc.getBalancesForEpoch(epoch1d)
-		if err != nil {
-			logrus.Errorf("error retrieving validator balances for epoch %v (1d): %v", epoch1d, err)
-			return
-		}
-		logger.Printf("retrieved data for %v validator balances for epoch %v (1d) took %v", len(parsedValidators.Data), epoch1d, time.Since(start))
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		start := time.Now()
-		var err error
-		validatorBalances7d, err = lc.getBalancesForEpoch(epoch7d)
-		if err != nil {
-			logrus.Errorf("error retrieving validator balances for epoch %v (7d): %v", epoch7d, err)
-			return
-		}
-		logger.Printf("retrieved data for %v validator balances for epoch %v (7d) took %v", len(parsedValidators.Data), epoch7d, time.Since(start))
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		start := time.Now()
-		var err error
-		validatorBalances31d, err = lc.getBalancesForEpoch(epoch31d)
-		if err != nil {
-			logrus.Errorf("error retrieving validator balances for epoch %v (31d): %v", epoch31d, err)
-			return
-		}
-		logger.Printf("retrieved data for %v validator balances for epoch %v (31d) took %v", len(parsedValidators.Data), epoch31d, time.Since(start))
-	}()
-	wg.Wait()
-
+	if !skipHistoricBalances {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			var err error
+			validatorBalances1d, err = lc.getBalancesForEpoch(epoch1d)
+			if err != nil {
+				logrus.Errorf("error retrieving validator balances for epoch %v (1d): %v", epoch1d, err)
+				return
+			}
+			logger.Printf("retrieved data for %v validator balances for epoch %v (1d) took %v", len(parsedValidators.Data), epoch1d, time.Since(start))
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			var err error
+			validatorBalances7d, err = lc.getBalancesForEpoch(epoch7d)
+			if err != nil {
+				logrus.Errorf("error retrieving validator balances for epoch %v (7d): %v", epoch7d, err)
+				return
+			}
+			logger.Printf("retrieved data for %v validator balances for epoch %v (7d) took %v", len(parsedValidators.Data), epoch7d, time.Since(start))
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			var err error
+			validatorBalances31d, err = lc.getBalancesForEpoch(epoch31d)
+			if err != nil {
+				logrus.Errorf("error retrieving validator balances for epoch %v (31d): %v", epoch31d, err)
+				return
+			}
+			logger.Printf("retrieved data for %v validator balances for epoch %v (31d) took %v", len(parsedValidators.Data), epoch31d, time.Since(start))
+		}()
+		wg.Wait()
+	}
 	for _, validator := range parsedValidators.Data {
 		data.Validators = append(data.Validators, &types.Validator{
 			Index:                      uint64(validator.Index),
@@ -349,9 +354,9 @@ func (lc *LighthouseClient) GetEpochData(epoch uint64) (*types.EpochData, error)
 			ActivationEpoch:            uint64(validator.Validator.ActivationEpoch),
 			ExitEpoch:                  uint64(validator.Validator.ExitEpoch),
 			WithdrawableEpoch:          uint64(validator.Validator.WithdrawableEpoch),
-			Balance1d:                  validatorBalances1d[uint64(validator.Index)],
-			Balance7d:                  validatorBalances7d[uint64(validator.Index)],
-			Balance31d:                 validatorBalances31d[uint64(validator.Index)],
+			Balance1d:                  sql.NullInt64{Int64: int64(validatorBalances1d[uint64(validator.Index)]), Valid: true},
+			Balance7d:                  sql.NullInt64{Int64: int64(validatorBalances7d[uint64(validator.Index)]), Valid: true},
+			Balance31d:                 sql.NullInt64{Int64: int64(validatorBalances31d[uint64(validator.Index)]), Valid: true},
 			Status:                     validator.Status,
 		})
 	}
@@ -378,7 +383,6 @@ func (lc *LighthouseClient) GetEpochData(epoch uint64) (*types.EpochData, error)
 			logger.Errorf("error retrieving epoch participation statistics for epoch %v: %v", epoch, err)
 			data.EpochParticipationStats = &types.ValidatorParticipation{
 				Epoch:                   epoch,
-				Finalized:               false,
 				GlobalParticipationRate: 1.0,
 				VotedEther:              0,
 				EligibleEther:           0,
@@ -795,7 +799,37 @@ func syncCommitteeParticipation(bits []byte) float64 {
 
 // GetValidatorParticipation will get the validator participation from the Lighthouse RPC api
 func (lc *LighthouseClient) GetValidatorParticipation(epoch uint64) (*types.ValidatorParticipation, error) {
-	resp, err := lc.get(fmt.Sprintf("%s/lighthouse/validator_inclusion/%d/global", lc.endpoint, epoch))
+	if LighthouseLatestHeadEpoch == 0 || epoch >= LighthouseLatestHeadEpoch-1 {
+		// update LighthouseLatestHeadEpoch to make sure we are continuing with the latest data
+		// we need to check when epoch = head and epoch head - 1 so our following logic acts correctly when we are close to the head
+		head, err := lc.GetChainHead()
+		if err != nil {
+			return nil, err
+		}
+		logger.Infof("Updating LighthouseLatestHeadEpoch to %v", head.HeadEpoch)
+		LighthouseLatestHeadEpoch = head.HeadEpoch
+	}
+
+	if epoch > LighthouseLatestHeadEpoch {
+		return nil, fmt.Errorf("epoch %v is newer than the latest head %v", epoch, LighthouseLatestHeadEpoch)
+	}
+	if epoch == LighthouseLatestHeadEpoch {
+		// participation stats are calculated at the end of an epoch,
+		// making it impossible to retrieve stats of an currently ongoing epoch
+		return nil, fmt.Errorf("epoch %v can't be retrieved as it hasn't finished yet", epoch)
+	}
+
+	request_epoch := epoch
+	if epoch < LighthouseLatestHeadEpoch-1 {
+		// we offset the request epoch by one for older epochs so we get the complete participation numbers
+		// this is required as votes can be include up to one epoch after their intended inclusion
+		// we also have to make sure we don't attempt to request the current head epoch,
+		// since requesting it is impossible – see above error about it
+		// ref: https://lighthouse-book.sigmaprime.io/validator-inclusion.html#global
+		request_epoch += 1
+	}
+
+	resp, err := lc.get(fmt.Sprintf("%s/lighthouse/validator_inclusion/%d/global", lc.endpoint, request_epoch))
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving validator participation data for epoch %v: %v", epoch, err)
 	}
@@ -806,14 +840,24 @@ func (lc *LighthouseClient) GetValidatorParticipation(epoch uint64) (*types.Vali
 		return nil, fmt.Errorf("error parsing validator participation data for epoch %v: %v", epoch, err)
 	}
 
-	return &types.ValidatorParticipation{
-		Epoch: epoch,
-		// technically there are rules for delayed finalization through previous epoch, applied only later. But good enough, this matches previous wonky behavior
-		Finalized:               float32(parsedResponse.Data.CurrentEpochTargetAttestingGwei)/float32(parsedResponse.Data.CurrentEpochActiveGwei) > (float32(2) / float32(3)),
-		GlobalParticipationRate: float32(parsedResponse.Data.PreviousEpochTargetAttestingGwei) / float32(parsedResponse.Data.CurrentEpochActiveGwei),
-		VotedEther:              uint64(parsedResponse.Data.PreviousEpochTargetAttestingGwei),
-		EligibleEther:           uint64(parsedResponse.Data.CurrentEpochActiveGwei),
-	}, nil
+	var res *types.ValidatorParticipation
+	if epoch < request_epoch {
+		// we requested the next epoch, so we have to use the previous value for everything here
+		res = &types.ValidatorParticipation{
+			Epoch:                   epoch,
+			GlobalParticipationRate: float32(parsedResponse.Data.PreviousEpochTargetAttestingGwei) / float32(parsedResponse.Data.PreviousEpochActiveGwei),
+			VotedEther:              uint64(parsedResponse.Data.PreviousEpochTargetAttestingGwei),
+			EligibleEther:           uint64(parsedResponse.Data.PreviousEpochActiveGwei),
+		}
+	} else {
+		res = &types.ValidatorParticipation{
+			Epoch:                   epoch,
+			GlobalParticipationRate: float32(parsedResponse.Data.CurrentEpochTargetAttestingGwei) / float32(parsedResponse.Data.CurrentEpochActiveGwei),
+			VotedEther:              uint64(parsedResponse.Data.CurrentEpochTargetAttestingGwei),
+			EligibleEther:           uint64(parsedResponse.Data.CurrentEpochActiveGwei),
+		}
+	}
+	return res, nil
 }
 
 func (lc *LighthouseClient) GetFinalityCheckpoints(epoch uint64) (*types.FinalityCheckpoints, error) {

@@ -286,6 +286,16 @@ func DeleteSubscription(userID uint64, network string, eventName types.EventName
 	return err
 }
 
+func DeleteAllSubscription(userID uint64, network string, eventName types.EventName) error {
+	name := string(eventName)
+	if network != "" && !types.IsUserIndexed(eventName) {
+		name = strings.ToLower(network) + ":" + string(eventName)
+	}
+
+	_, err := FrontendWriterDB.Exec("DELETE FROM users_subscriptions WHERE user_id = $1 and event_name = $2", userID, name)
+	return err
+}
+
 func InsertMobileSubscription(tx *sql.Tx, userID uint64, paymentDetails types.MobileSubscription, store, receipt string, expiration int64, rejectReson string, extSubscriptionId string) error {
 	now := time.Now()
 	nowTs := now.Unix()
@@ -392,6 +402,22 @@ func UpdateUserSubscription(tx *sql.Tx, id uint64, valid bool, expiration int64,
 	} else {
 		_, err = tx.Exec("UPDATE users_app_subscriptions SET active = $1, updated_at = TO_TIMESTAMP($2), expires_at = TO_TIMESTAMP($3), reject_reason = $4 WHERE id = $5;",
 			valid, nowTs, expiration, rejectReason, id,
+		)
+	}
+
+	return err
+}
+
+func SetSubscriptionToExpired(tx *sql.Tx, id uint64) error {
+	var err error
+	query := "UPDATE users_app_subscriptions SET validate_remotely = false, reject_reason = 'expired' WHERE id = $1;"
+	if tx == nil {
+		_, err = FrontendWriterDB.Exec(query,
+			id,
+		)
+	} else {
+		_, err = tx.Exec(query,
+			id,
 		)
 	}
 
